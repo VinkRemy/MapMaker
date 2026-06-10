@@ -52,9 +52,9 @@
         </div>
         
         <div class="info-text">
-            ✅ Exacte CBS provinciegrenzen (vanuit lokaal bestand)<br>
-            📍 Upload afbeelding per provincie<br>
-            🔄 Afbeelding blijft zitten bij zoomen/pan
+            ✅ Exacte CBS provinciegrenzen<br>
+            📍 Afbeelding wordt GEKNIEPT binnen de provinciegrenzen<br>
+            🔄 Werkt met zoomen en pannen
         </div>
     </div>
 </div>
@@ -70,7 +70,8 @@
     let currentProvince = null;
     let geoJsonLayer = null;
     let provinceLayers = {};
-    let imageOverlays = {}; // Hier slaan we de image overlays op
+    let imageOverlays = {};
+    let svgOverlay = null;
     
     function showLoading() {
         const mapDiv = document.getElementById('map');
@@ -87,14 +88,203 @@
         if (loader) loader.remove();
     }
     
+    // Maak een SVG overlay aan voor de afbeeldingen (1 keer)
+    function initSVGOverlay() {
+        if (svgOverlay) return;
+        
+        svgOverlay = L.svg({ padding: 0.5 });
+        svgOverlay.addTo(map);
+        
+        // SVG element pakken
+        const svg = document.querySelector('#map svg');
+        if (svg) {
+            // Voeg een defs sectie toe voor clipPaths
+            let defs = svg.querySelector('defs');
+            if (!defs) {
+                defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+                svg.appendChild(defs);
+            }
+        }
+    }
+    
+    function applyImageToProvince(provinceName, imageUrl) {
+        const layer = provinceLayers[provinceName];
+        if (!layer) {
+            console.error('Laag niet gevonden voor:', provinceName);
+            return;
+        }
+        
+        initSVGOverlay();
+        
+        // Verwijder bestaande overlay
+        if (imageOverlays[provinceName]) {
+            const svg = document.querySelector('#map svg');
+            const existingGroup = svg?.querySelector(`#overlay-${provinceName.replace(/\s/g, '')}`);
+            if (existingGroup) existingGroup.remove();
+            delete imageOverlays[provinceName];
+        }
+        
+        // Haal de path data op van de provincie
+        const pathElement = layer._path;
+        if (!pathElement) {
+            console.error('Geen path element gevonden');
+            return;
+        }
+        
+        // Kopieer de path data
+        const pathData = pathElement.getAttribute('d');
+        if (!pathData) {
+            console.error('Geen path data');
+            return;
+        }
+        
+        const svg = document.querySelector('#map svg');
+        if (!svg) return;
+        
+        let defs = svg.querySelector('defs');
+        if (!defs) {
+            defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            svg.appendChild(defs);
+        }
+        
+        // Maak clipPath ID
+        const clipId = `clip-${provinceName.replace(/\s/g, '')}`;
+        
+        // Verwijder bestaande clipPath
+        const existingClip = defs.querySelector(`#${clipId}`);
+        if (existingClip) existingClip.remove();
+        
+        // Maak nieuwe clipPath
+        const clipPath = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
+        clipPath.setAttribute('id', clipId);
+        
+        const clipPathElement = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        clipPathElement.setAttribute('d', pathData);
+        clipPath.appendChild(clipPathElement);
+        defs.appendChild(clipPath);
+        
+        // Bepaal de bounds van de provincie
+        const bounds = layer.getBounds();
+        const topLeft = map.latLngToLayerPoint(bounds.getNorthWest());
+        const bottomRight = map.latLngToLayerPoint(bounds.getSouthEast());
+        const width = bottomRight.x - topLeft.x;
+        const height = bottomRight.y - topLeft.y;
+        
+        // Maak groep voor deze afbeelding
+        const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        group.setAttribute('id', `overlay-${provinceName.replace(/\s/g, '')}`);
+        group.setAttribute('clip-path', `url(#${clipId})`);
+        
+        // Voeg afbeelding toe
+        const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+        image.setAttribute('href', imageUrl);
+        image.setAttribute('x', topLeft.x);
+        image.setAttribute('y', topLeft.y);
+        image.setAttribute('width', width);
+        image.setAttribute('height', height);
+        image.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+        
+        group.appendChild(image);
+        svg.appendChild(group);
+        
+        imageOverlays[provinceName] = {
+            group: group,
+            clipId: clipId,
+            image: image
+        };
+        
+        // Maak de provincie transparant
+        layer.setStyle({ 
+            fillOpacity: 0, 
+            fillColor: 'transparent',
+            color: 'white',
+            weight: 2
+        });
+        
+        // Update functie voor zoomen/pan
+        function updatePosition() {
+            const newBounds = layer.getBounds();
+            if (!newBounds.isValid()) return;
+            
+            const newTopLeft = map.latLngToLayerPoint(newBounds.getNorthWest());
+            const newBottomRight = map.latLngToLayerPoint(newBounds.getSouthEast());
+            const newWidth = newBottomRight.x - newTopLeft.x;
+            const newHeight = newBottomRight.y - newTopLeft.y;
+            
+            if (newWidth > 0 && newHeight > 0) {
+                image.setAttribute('x', newTopLeft.x);
+                image.setAttribute('y', newTopLeft.y);
+                image.setAttribute('width', newWidth);
+                image.setAttribute('height', newHeight);
+            }
+        }
+        
+        // Sla de update functie op zodat we hem later kunnen verwijderen
+        if (!window.updateHandlers) window.updateHandlers = {};
+        window.updateHandlers[provinceName] = updatePosition;
+        
+        map.on('move', updatePosition);
+        map.on('zoom', updatePosition);
+        
+        console.log(`✅ Afbeelding toegevoegd aan ${provinceName} (met clipping!)`);
+    }
+    
+    function resetProvinceImage(provinceName) {
+        // Verwijder de SVG groep
+        if (imageOverlays[provinceName]) {
+            const svg = document.querySelector('#map svg');
+            const group = imageOverlays[provinceName].group;
+            if (group && group.parentNode) group.parentNode.removeChild(group);
+            
+            // Verwijder clipPath
+            const defs = svg?.querySelector('defs');
+            const clipId = imageOverlays[provinceName].clipId;
+            if (defs && clipId) {
+                const clip = defs.querySelector(`#${clipId}`);
+                if (clip) clip.remove();
+            }
+            
+            delete imageOverlays[provinceName];
+        }
+        
+        // Verwijder event handlers
+        if (window.updateHandlers && window.updateHandlers[provinceName]) {
+            map.off('move', window.updateHandlers[provinceName]);
+            map.off('zoom', window.updateHandlers[provinceName]);
+            delete window.updateHandlers[provinceName];
+        }
+        
+        // Zet provincie stijl terug
+        const layer = provinceLayers[provinceName];
+        if (layer) {
+            layer.setStyle({ 
+                fillColor: '#69b3b2', 
+                fillOpacity: 0.7,
+                color: 'white',
+                weight: 2
+            });
+        }
+        
+        console.log(`✅ Afbeelding verwijderd van ${provinceName}`);
+    }
+    
+    function updatePreview() {
+        const previewDiv = document.getElementById('preview-image');
+        const previewText = document.getElementById('preview-text');
+        if (currentProvince && provinceImages[currentProvince]) {
+            previewText.innerHTML = 'Afbeelding:';
+            previewDiv.innerHTML = `<img src="${provinceImages[currentProvince]}" alt="Preview">`;
+        } else {
+            previewText.innerHTML = 'Geen afbeelding';
+            previewDiv.innerHTML = '';
+        }
+    }
+    
     showLoading();
     
-    // Gebruik het gedownloade CBS bestand
     fetch('provincies.json')
         .then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.json();
         })
         .then(data => {
@@ -102,11 +292,8 @@
             console.log('✅ CBS provincies geladen');
             
             let geoJsonData = data;
-            if (data.features) {
-                geoJsonData = data;
-            } else if (data.result && data.result.features) {
-                geoJsonData = data.result;
-            }
+            if (data.features) geoJsonData = data;
+            else if (data.result && data.result.features) geoJsonData = data.result;
             
             geoJsonLayer = L.geoJSON(geoJsonData, {
                 style: {
@@ -116,16 +303,12 @@
                     fillOpacity: 0.7
                 },
                 onEachFeature: (feature, layer) => {
-                    // Probeer verschillende property namen voor de provincienaam
                     const name = feature.properties?.statnaam || 
                                 feature.properties?.naam || 
                                 feature.properties?.provincienaam ||
                                 feature.properties?.name;
                     
-                    if (!name) {
-                        console.warn('Geen naam gevonden:', feature.properties);
-                        return;
-                    }
+                    if (!name) return;
                     
                     provinceLayers[name] = layer;
                     
@@ -134,7 +317,6 @@
                         document.getElementById('selected-province-name').innerText = name;
                         updatePreview();
                         
-                        // Highlight geselecteerde provincie
                         geoJsonLayer.eachLayer(l => {
                             const lName = l.feature.properties?.statnaam || 
                                         l.feature.properties?.naam || 
@@ -167,89 +349,18 @@
             
             // Herstel opgeslagen afbeeldingen
             for (const [prov, img] of Object.entries(provinceImages)) {
-                if (provinceLayers[prov]) {
-                    applyImageToProvince(prov, img);
-                }
+                if (provinceLayers[prov]) applyImageToProvince(prov, img);
             }
         })
         .catch(error => {
             hideLoading();
-            console.error('Fout bij laden:', error);
-            alert(`❌ Kan provincies.json niet laden.\n\nZorg dat:\n1. Je het CBS GeoJSON bestand hebt gedownload\n2. Het bestand in dezelfde map staat als index.html\n3. Het bestand 'provincies.json' heet\n\nFout: ${error.message}`);
+            console.error('Fout:', error);
+            alert(`❌ Kan provincies.json niet laden.\n\nZorg dat het bestand in dezelfde map staat.\n\nFout: ${error.message}`);
         });
-    
-    function applyImageToProvince(provinceName, imageUrl) {
-        const layer = provinceLayers[provinceName];
-        if (!layer) {
-            console.error('Laag niet gevonden voor:', provinceName);
-            return;
-        }
-        
-        // Verwijder bestaande overlay als die er is
-        if (imageOverlays[provinceName]) {
-            map.removeLayer(imageOverlays[provinceName]);
-            delete imageOverlays[provinceName];
-        }
-        
-        // Krijg de bounds van de provincie
-        const bounds = layer.getBounds();
-        
-        // Maak een image overlay
-        const imageOverlay = L.imageOverlay(imageUrl, bounds, {
-            opacity: 0.9,
-            interactive: false,
-            zIndex: 10
-        }).addTo(map);
-        
-        imageOverlays[provinceName] = imageOverlay;
-        
-        // Maak de provincie transparant zodat de afbeelding zichtbaar is
-        layer.setStyle({ 
-            fillOpacity: 0, 
-            fillColor: 'transparent',
-            color: 'white',
-            weight: 2
-        });
-        
-        console.log(`✅ Afbeelding toegevoegd aan ${provinceName}`);
-    }
-    
-    function resetProvinceImage(provinceName) {
-        // Verwijder de image overlay
-        if (imageOverlays[provinceName]) {
-            map.removeLayer(imageOverlays[provinceName]);
-            delete imageOverlays[provinceName];
-        }
-        
-        // Zet de provincie stijl terug
-        const layer = provinceLayers[provinceName];
-        if (layer) {
-            layer.setStyle({ 
-                fillColor: '#69b3b2', 
-                fillOpacity: 0.7,
-                color: 'white',
-                weight: 2
-            });
-        }
-        
-        console.log(`✅ Afbeelding verwijderd van ${provinceName}`);
-    }
-    
-    function updatePreview() {
-        const previewDiv = document.getElementById('preview-image');
-        const previewText = document.getElementById('preview-text');
-        if (currentProvince && provinceImages[currentProvince]) {
-            previewText.innerHTML = 'Afbeelding:';
-            previewDiv.innerHTML = `<img src="${provinceImages[currentProvince]}" alt="Preview">`;
-        } else {
-            previewText.innerHTML = 'Geen afbeelding';
-            previewDiv.innerHTML = '';
-        }
-    }
     
     document.getElementById('setImageBtn').addEventListener('click', () => {
         if (!currentProvince) {
-            alert('❌ Klik eerst op een provincie op de kaart!');
+            alert('❌ Klik eerst op een provincie!');
             return;
         }
         
@@ -267,9 +378,6 @@
             updatePreview();
             alert(`✅ Afbeelding toegevoegd aan ${currentProvince}`);
         };
-        reader.onerror = () => {
-            alert('❌ Fout bij lezen van afbeelding');
-        };
         reader.readAsDataURL(file);
     });
     
@@ -280,7 +388,7 @@
         }
         
         if (!provinceImages[currentProvince]) {
-            alert(`ℹ️ ${currentProvince} heeft nog geen afbeelding`);
+            alert(`ℹ️ ${currentProvince} heeft geen afbeelding`);
             return;
         }
         
