@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MapChart-Kloon - Exacte CBS Provincies</title>
+    <title>MapChart-Kloon - Perfecte afbeeldingen per provincie</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
@@ -24,15 +24,6 @@
         .info-text { font-size: 13px; color: #666; margin-top: 15px; padding: 10px; background: #e8f5e9; border-radius: 5px; }
         h2 { margin-bottom: 10px; }
         .loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 8px; z-index: 1000; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
-        
-        /* Zorg dat de SVG overlay boven de tiles maar onder de interactie ligt */
-        .leaflet-overlay-pane svg {
-            z-index: 10;
-        }
-        
-        .province-image {
-            pointer-events: none;
-        }
     </style>
 </head>
 <body>
@@ -62,9 +53,9 @@
         
         <div class="info-text">
             ✅ Exacte CBS provinciegrenzen<br>
-            📍 Afbeelding wordt GEKNIEPT binnen de provinciegrenzen<br>
-            🔄 Blijft zitten bij zoomen/pan<br>
-            ✂️ Geen overlay meer na wegklikken
+            📍 Afbeelding wordt getekend binnen de provincievorm<br>
+            🔄 Blijft perfect bij zoomen en pannen!<br>
+            ✂️ Geen rare verschuivingen meer
         </div>
     </div>
 </div>
@@ -80,7 +71,8 @@
     let currentProvince = null;
     let geoJsonLayer = null;
     let provinceLayers = {};
-    let imageElements = {}; // Sla de image elementen op per provincie
+    let canvasOverlay = null;
+    let redrawNeeded = true;
     
     function showLoading() {
         const mapDiv = document.getElementById('map');
@@ -97,24 +89,160 @@
         if (loader) loader.remove();
     }
     
-    function getOrCreateSVGContainer() {
-        // Zoek de SVG container van Leaflet
-        let svg = document.querySelector('#map .leaflet-overlay-pane svg');
-        if (!svg) {
-            // Als er nog geen SVG is, maak er een aan
-            const overlayPane = document.querySelector('#map .leaflet-overlay-pane');
-            if (overlayPane) {
-                svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                svg.style.position = 'absolute';
-                svg.style.top = '0';
-                svg.style.left = '0';
-                svg.style.width = '100%';
-                svg.style.height = '100%';
-                overlayPane.appendChild(svg);
+    // Canvas overlay klasse voor het tekenen van afbeeldingen
+    const ImageCanvasOverlay = L.Layer.extend({
+        initialize: function(options) {
+            L.setOptions(this, options);
+            this._drawing = false;
+        },
+        
+        onAdd: function(map) {
+            this._map = map;
+            
+            // Maak canvas element
+            this._canvas = document.createElement('canvas');
+            this._canvas.style.position = 'absolute';
+            this._canvas.style.top = '0';
+            this._canvas.style.left = '0';
+            this._canvas.style.pointerEvents = 'none';
+            this._canvas.style.zIndex = '5';
+            
+            const pane = map.getPane('overlayPane');
+            pane.appendChild(this._canvas);
+            
+            this._resize();
+            
+            map.on('moveend', this._redraw, this);
+            map.on('zoomend', this._redraw, this);
+            map.on('resize', this._resize, this);
+            
+            this._redraw();
+        },
+        
+        onRemove: function(map) {
+            map.off('moveend', this._redraw, this);
+            map.off('zoomend', this._redraw, this);
+            map.off('resize', this._resize, this);
+            
+            if (this._canvas) {
+                this._canvas.remove();
             }
+        },
+        
+        _resize: function() {
+            const size = this._map.getSize();
+            this._canvas.width = size.x;
+            this._canvas.height = size.y;
+            this._canvas.style.width = size.x + 'px';
+            this._canvas.style.height = size.y + 'px';
+            this._redraw();
+        },
+        
+        _redraw: function() {
+            if (!this._canvas) return;
+            
+            const ctx = this._canvas.getContext('2d');
+            ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+            
+            // Teken alle afbeeldingen
+            for (const [provinceName, imageData] of Object.entries(provinceImages)) {
+                const layer = provinceLayers[provinceName];
+                if (!layer || !imageData.imageLoaded) continue;
+                
+                // Krijg de bounds in canvas coördinaten
+                const bounds = layer.getBounds();
+                const topLeft = this._map.latLngToContainerPoint(bounds.getNorthWest());
+                const bottomRight = this._map.latLngToContainerPoint(bounds.getSouthEast());
+                const width = bottomRight.x - topLeft.x;
+                const height = bottomRight.y - topLeft.y;
+                
+                if (width <= 0 || height <= 0) continue;
+                
+                // Sla context op
+                ctx.save();
+                
+                // Maak een clip path van de provincie
+                ctx.beginPath();
+                
+                // Haal de polygon punten op
+                const latlngs = this._getPolygonPoints(layer);
+                if (latlngs.length === 0) {
+                    ctx.restore();
+                    continue;
+                }
+                
+                // Teken het pad
+                let first = true;
+                for (const point of latlngs) {
+                    const containerPoint = this._map.latLngToContainerPoint(point);
+                    if (first) {
+                        ctx.moveTo(containerPoint.x, containerPoint.y);
+                        first = false;
+                    } else {
+                        ctx.lineTo(containerPoint.x, containerPoint.y);
+                    }
+                }
+                ctx.closePath();
+                ctx.clip();
+                
+                // Teken de afbeelding
+                try {
+                    ctx.drawImage(imageData.img, topLeft.x, topLeft.y, width, height);
+                } catch(e) {
+                    console.error('Fout bij tekenen:', e);
+                }
+                
+                ctx.restore();
+            }
+        },
+        
+        _getPolygonPoints: function(layer) {
+            // Haal alle punten uit de layer (ondersteunt Polygon en MultiPolygon)
+            const points = [];
+            
+            function extractPoints(geometry) {
+                if (geometry.type === 'Polygon') {
+                    for (const ring of geometry.coordinates) {
+                        for (const coord of ring) {
+                            points.push(L.latLng(coord[1], coord[0]));
+                        }
+                    }
+                } else if (geometry.type === 'MultiPolygon') {
+                    for (const polygon of geometry.coordinates) {
+                        for (const ring of polygon) {
+                            for (const coord of ring) {
+                                points.push(L.latLng(coord[1], coord[0]));
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (layer.feature && layer.feature.geometry) {
+                extractPoints(layer.feature.geometry);
+            } else if (layer._latlngs) {
+                // Fallback voor Leaflet polygon
+                const processLatLngs = (latlngs) => {
+                    if (Array.isArray(latlngs)) {
+                        for (const item of latlngs) {
+                            if (item.lat !== undefined) {
+                                points.push(item);
+                            } else {
+                                processLatLngs(item);
+                            }
+                        }
+                    }
+                };
+                processLatLngs(layer._latlngs);
+            }
+            
+            return points;
+        },
+        
+        refresh: function() {
+            this._redraw();
         }
-        return svg;
-    }
+    });
     
     function applyImageToProvince(provinceName, imageUrl) {
         const layer = provinceLayers[provinceName];
@@ -123,171 +251,62 @@
             return;
         }
         
-        // Verwijder bestaande afbeelding
-        if (imageElements[provinceName]) {
-            const oldImg = imageElements[provinceName];
-            if (oldImg.parentNode) oldImg.parentNode.removeChild(oldImg);
-            delete imageElements[provinceName];
-        }
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
         
-        // Haal de exacte path data op van de Leaflet layer
-        const pathElement = layer._path;
-        if (!pathElement) {
-            console.error('Geen path element gevonden');
-            return;
-        }
-        
-        // Kopieer de path data (dit is het SVG pad van de provincie)
-        const pathData = pathElement.getAttribute('d');
-        if (!pathData) {
-            console.error('Geen path data');
-            return;
-        }
-        
-        // Krijg de SVG container
-        const svg = getOrCreateSVGContainer();
-        if (!svg) {
-            console.error('Geen SVG container');
-            return;
-        }
-        
-        // Zorg voor een defs element
-        let defs = svg.querySelector('defs');
-        if (!defs) {
-            defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-            svg.appendChild(defs);
-        }
-        
-        // Maak een clipPath voor deze provincie
-        const clipId = `clip-${provinceName.replace(/\s/g, '')}`;
-        const existingClip = defs.querySelector(`#${clipId}`);
-        if (existingClip) existingClip.remove();
-        
-        const clipPath = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
-        clipPath.setAttribute('id', clipId);
-        
-        const clipPathElement = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        clipPathElement.setAttribute('d', pathData);
-        clipPath.appendChild(clipPathElement);
-        defs.appendChild(clipPath);
-        
-        // Bepaal de bounds van de provincie voor de afbeeldingsgrootte
-        const bounds = layer.getBounds();
-        const topLeft = map.latLngToLayerPoint(bounds.getNorthWest());
-        const bottomRight = map.latLngToLayerPoint(bounds.getSouthEast());
-        const width = bottomRight.x - topLeft.x;
-        const height = bottomRight.y - topLeft.y;
-        
-        // Maak de image group
-        const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        group.setAttribute('clip-path', `url(#${clipId})`);
-        group.classList.add('province-image');
-        
-        // Maak de afbeelding
-        const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
-        img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', imageUrl);
-        img.setAttribute('x', topLeft.x);
-        img.setAttribute('y', topLeft.y);
-        img.setAttribute('width', width);
-        img.setAttribute('height', height);
-        img.setAttribute('preserveAspectRatio', 'xMidYMid slice');
-        
-        group.appendChild(img);
-        svg.appendChild(group);
-        
-        // Opslaan voor later
-        imageElements[provinceName] = {
-            group: group,
-            img: img,
-            clipId: clipId,
-            topLeft: topLeft,
-            width: width,
-            height: height
-        };
-        
-        // Maak de provincie volledig transparant (geen fill meer)
-        layer.setStyle({ 
-            fillOpacity: 0, 
-            fillColor: 'transparent',
-            color: 'white',
-            weight: 2,
-            opacity: 1
-        });
-        
-        // Update functie voor zoomen/pan
-        function updateImagePosition() {
-            const newBounds = layer.getBounds();
-            if (!newBounds.isValid()) return;
+        img.onload = () => {
+            provinceImages[provinceName] = {
+                img: img,
+                imageLoaded: true,
+                url: imageUrl
+            };
             
-            const newTopLeft = map.latLngToLayerPoint(newBounds.getNorthWest());
-            const newBottomRight = map.latLngToLayerPoint(newBounds.getSouthEast());
-            const newWidth = newBottomRight.x - newTopLeft.x;
-            const newHeight = newBottomRight.y - newTopLeft.y;
-            
-            if (newWidth > 0 && newHeight > 0 && imageElements[provinceName]) {
-                const imgData = imageElements[provinceName];
-                imgData.img.setAttribute('x', newTopLeft.x);
-                imgData.img.setAttribute('y', newTopLeft.y);
-                imgData.img.setAttribute('width', newWidth);
-                imgData.img.setAttribute('height', newHeight);
-                imgData.topLeft = newTopLeft;
-                imgData.width = newWidth;
-                imgData.height = newHeight;
-            }
-        }
-        
-        // Sla update functie op voor cleanup later
-        if (!window.updateHandlers) window.updateHandlers = {};
-        if (window.updateHandlers[provinceName]) {
-            map.off('move', window.updateHandlers[provinceName]);
-            map.off('zoom', window.updateHandlers[provinceName]);
-        }
-        window.updateHandlers[provinceName] = updateImagePosition;
-        
-        map.on('move', updateImagePosition);
-        map.on('zoom', updateImagePosition);
-        
-        console.log(`✅ Afbeelding toegevoegd aan ${provinceName}`);
-    }
-    
-    function resetProvinceImage(provinceName) {
-        // Verwijder de image group
-        if (imageElements[provinceName]) {
-            const group = imageElements[provinceName].group;
-            if (group && group.parentNode) group.parentNode.removeChild(group);
-            
-            // Verwijder clipPath
-            const svg = getOrCreateSVGContainer();
-            if (svg) {
-                let defs = svg.querySelector('defs');
-                if (defs) {
-                    const clip = defs.querySelector(`#${imageElements[provinceName].clipId}`);
-                    if (clip) clip.remove();
-                }
-            }
-            
-            delete imageElements[provinceName];
-        }
-        
-        // Verwijder event handlers
-        if (window.updateHandlers && window.updateHandlers[provinceName]) {
-            map.off('move', window.updateHandlers[provinceName]);
-            map.off('zoom', window.updateHandlers[provinceName]);
-            delete window.updateHandlers[provinceName];
-        }
-        
-        // Zet provincie stijl terug (weer zichtbaar met kleur)
-        const layer = provinceLayers[provinceName];
-        if (layer) {
+            // Maak de provincie transparant
             layer.setStyle({ 
-                fillColor: '#69b3b2', 
-                fillOpacity: 0.7,
+                fillOpacity: 0, 
+                fillColor: 'transparent',
                 color: 'white',
                 weight: 2
             });
-        }
+            
+            // Ververs de canvas overlay
+            if (canvasOverlay) {
+                canvasOverlay.refresh();
+            }
+            
+            console.log(`✅ Afbeelding toegevoegd aan ${provinceName}`);
+        };
         
-        console.log(`✅ Afbeelding verwijderd van ${provinceName}`);
+        img.onerror = () => {
+            console.error(`❌ Kon afbeelding niet laden voor ${provinceName}`);
+            alert('Fout bij laden van afbeelding');
+        };
+        
+        img.src = imageUrl;
+    }
+    
+    function resetProvinceImage(provinceName) {
+        if (provinceImages[provinceName]) {
+            delete provinceImages[provinceName];
+            
+            // Zet provincie stijl terug
+            const layer = provinceLayers[provinceName];
+            if (layer) {
+                layer.setStyle({ 
+                    fillColor: '#69b3b2', 
+                    fillOpacity: 0.7,
+                    color: 'white',
+                    weight: 2
+                });
+            }
+            
+            // Ververs canvas
+            if (canvasOverlay) {
+                canvasOverlay.refresh();
+            }
+            
+            console.log(`✅ Afbeelding verwijderd van ${provinceName}`);
+        }
     }
     
     function updatePreview() {
@@ -295,7 +314,7 @@
         const previewText = document.getElementById('preview-text');
         if (currentProvince && provinceImages[currentProvince]) {
             previewText.innerHTML = 'Afbeelding:';
-            previewDiv.innerHTML = `<img src="${provinceImages[currentProvince]}" alt="Preview" style="max-width:100%; max-height:120px;">`;
+            previewDiv.innerHTML = `<img src="${provinceImages[currentProvince].url}" alt="Preview" style="max-width:100%; max-height:120px;">`;
         } else {
             previewText.innerHTML = 'Geen afbeelding';
             previewDiv.innerHTML = '';
@@ -334,15 +353,12 @@
                     
                     provinceLayers[name] = layer;
                     
-                    layer.on('click', (e) => {
-                        // Stop propagation zodat het niet dubbel gaat
-                        if (e && e.originalEvent) e.originalEvent.stopPropagation();
-                        
+                    layer.on('click', () => {
                         currentProvince = name;
                         document.getElementById('selected-province-name').innerText = name;
                         updatePreview();
                         
-                        // Highlight alleen de geselecteerde provincie
+                        // Highlight geselecteerde provincie
                         geoJsonLayer.eachLayer(l => {
                             const lName = l.feature.properties?.statnaam || 
                                         l.feature.properties?.naam || 
@@ -350,22 +366,18 @@
                             if (lName === name) {
                                 l.setStyle({ weight: 4, color: '#ff4444', fillOpacity: 0 });
                             } else {
-                                // Reset andere provincies naar hun originele stijl
-                                if (imageElements[lName]) {
-                                    l.setStyle({ fillOpacity: 0, fillColor: 'transparent' });
+                                if (provinceImages[lName]) {
+                                    l.setStyle({ fillOpacity: 0, fillColor: 'transparent', weight: 2, color: 'white' });
                                 } else {
-                                    l.setStyle({ fillColor: '#69b3b2', fillOpacity: 0.7 });
+                                    l.setStyle({ fillColor: '#69b3b2', fillOpacity: 0.7, weight: 2, color: 'white' });
                                 }
-                                l.setStyle({ weight: 2, color: 'white' });
                             }
                         });
                     });
                     
                     layer.on('mouseover', () => {
-                        // Alleen hover effect als het niet de geselecteerde is
                         if (currentProvince !== name) {
-                            // Check of deze provincie een afbeelding heeft
-                            if (imageElements[name]) {
+                            if (provinceImages[name]) {
                                 layer.setStyle({ weight: 3, color: '#ff4444', fillOpacity: 0 });
                             } else {
                                 layer.setStyle({ weight: 3, color: '#666', fillOpacity: 0.8 });
@@ -374,9 +386,8 @@
                     });
                     
                     layer.on('mouseout', () => {
-                        // Reset hover, maar behoud selectie status
                         if (currentProvince !== name) {
-                            if (imageElements[name]) {
+                            if (provinceImages[name]) {
                                 layer.setStyle({ weight: 2, color: 'white', fillOpacity: 0 });
                             } else {
                                 layer.setStyle({ fillColor: '#69b3b2', fillOpacity: 0.7, weight: 2, color: 'white' });
@@ -392,12 +403,9 @@
                 map.fitBounds(geoJsonLayer.getBounds());
             }
             
-            // Herstel opgeslagen afbeeldingen
-            for (const [prov, img] of Object.entries(provinceImages)) {
-                if (provinceLayers[prov]) {
-                    setTimeout(() => applyImageToProvince(prov, img), 100);
-                }
-            }
+            // Voeg canvas overlay toe voor afbeeldingen
+            canvasOverlay = new ImageCanvasOverlay();
+            canvasOverlay.addTo(map);
         })
         .catch(error => {
             hideLoading();
@@ -419,9 +427,7 @@
         
         const reader = new FileReader();
         reader.onload = e => {
-            const imageUrl = e.target.result;
-            provinceImages[currentProvince] = imageUrl;
-            applyImageToProvince(currentProvince, imageUrl);
+            applyImageToProvince(currentProvince, e.target.result);
             updatePreview();
             alert(`✅ Afbeelding toegevoegd aan ${currentProvince}`);
         };
@@ -442,7 +448,6 @@
             return;
         }
         
-        delete provinceImages[currentProvince];
         resetProvinceImage(currentProvince);
         updatePreview();
         alert(`✅ Afbeelding verwijderd van ${currentProvince}`);
