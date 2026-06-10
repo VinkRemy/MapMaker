@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MapChart-Kloon - Alle 12 provincies</title>
+    <title>MapChart-Kloon - Exacte CBS Provincies</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -25,7 +25,6 @@
         .info-text { font-size: 13px; color: #666; margin-top: 15px; padding: 10px; background: #e8f5e9; border-radius: 5px; }
         h2 { margin-bottom: 10px; }
         .loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 8px; z-index: 1000; text-align: center; }
-        .province-count { background: #1976d2; color: white; padding: 5px 10px; border-radius: 20px; font-size: 12px; display: inline-block; margin-bottom: 10px; }
     </style>
 </head>
 <body>
@@ -53,8 +52,10 @@
             <div id="preview-image"></div>
         </div>
         
-        <div class="info-text" id="info-text">
-            ✅ Laden van alle 12 provincies...
+        <div class="info-text">
+            ✅ Exacte CBS provinciegrenzen (vanuit lokaal bestand)<br>
+            📍 Upload afbeelding per provincie<br>
+            🔄 Afbeelding blijft zitten bij zoomen/pan
         </div>
     </div>
 </div>
@@ -71,42 +72,6 @@
     let geoJsonLayer = null;
     let provinceLayers = {};
     
-    // Configuratie voor de CBS API
-    const BASE_URL = 'https://api.pdok.nl/kadaster/bestuurlijkegebieden/ogc/v1_0/collections/bestuurlijkegebieden/items';
-    
-    // Filter alleen provincies (type 'provincie')
-    const PROVINCIE_FILTER = '&type-gelijk=provincie';
-    // Max 20 per pagina (genoeg voor alle 12 provincies, maar we doen paginering voor de zekerheid)
-    const LIMIT = 20;
-    
-    async function fetchAllProvincies() {
-        let allFeatures = [];
-        let nextUrl = `${BASE_URL}?f=json&limit=${LIMIT}${PROVINCIE_FILTER}`;
-        
-        document.getElementById('info-text').innerHTML = '⏳ Bezig met laden van provinciegrenzen...';
-        
-        while (nextUrl) {
-            console.log('Fetching:', nextUrl);
-            const response = await fetch(nextUrl);
-            const data = await response.json();
-            
-            if (data.features && data.features.length > 0) {
-                allFeatures = allFeatures.concat(data.features);
-                console.log(`Opgehaald: ${data.features.length} provincies (totaal nu: ${allFeatures.length})`);
-            }
-            
-            // Check voor volgende pagina (paginering)
-            const nextLink = data.links?.find(link => link.rel === 'next');
-            nextUrl = nextLink ? nextLink.href : null;
-        }
-        
-        console.log(`✅ Totaal ${allFeatures.length} provincies opgehaald`);
-        return {
-            type: 'FeatureCollection',
-            features: allFeatures
-        };
-    }
-    
     function showLoading() {
         const mapDiv = document.getElementById('map');
         const existing = document.querySelector('.loading');
@@ -122,29 +87,29 @@
         if (loader) loader.remove();
     }
     
-    function extractProvinceName(properties) {
-        // Probeer alle mogelijke velden voor de provincienaam
-        return properties?.statnaam || 
-               properties?.naam || 
-               properties?.provincienaam ||
-               properties?.name ||
-               properties?.display_name ||
-               'Onbekend';
-    }
+    showLoading();
     
-    async function loadMap() {
-        showLoading();
-        
-        try {
-            const geoJsonData = await fetchAllProvincies();
+    // Gebruik het gedownloade CBS bestand
+    // Zet het bestand in dezelfde map als index.html en noem het 'provincies.json'
+    fetch('provincies.json')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            return response.json();
+        })
+        .then(data => {
             hideLoading();
+            console.log('✅ CBS provincies geladen:', data.features?.length || 'onbekend aantal');
             
-            const provinceCount = geoJsonData.features.length;
-            document.getElementById('info-text').innerHTML = `✅ ${provinceCount} provincies geladen (CBS officiële data)`;
-            
-            if (provinceCount < 12) {
-                console.warn(`Slechts ${provinceCount} provincies geladen, verwacht 12`);
-                document.getElementById('info-text').innerHTML = `⚠️ ${provinceCount}/12 provincies geladen - API geeft niet alle data`;
+            // Check of de data features heeft (GeoJSON formaat)
+            let geoJsonData = data;
+            if (data.features) {
+                geoJsonData = data;
+            } else if (data.result && data.result.features) {
+                geoJsonData = data.result;
+            } else {
+                console.warn('Onbekend formaat:', data);
             }
             
             geoJsonLayer = L.geoJSON(geoJsonData, {
@@ -155,10 +120,14 @@
                     fillOpacity: 0.7
                 },
                 onEachFeature: (feature, layer) => {
-                    const name = extractProvinceName(feature.properties);
+                    // CBS gebruikt vaak 'statnaam' of 'naam' voor de provincienaam
+                    const name = feature.properties?.statnaam || 
+                                feature.properties?.naam || 
+                                feature.properties?.provincienaam ||
+                                feature.properties?.name;
                     
-                    if (!name || name === 'Onbekend') {
-                        console.warn('Onbekende provincienaam:', feature.properties);
+                    if (!name) {
+                        console.warn('Geen naam gevonden:', feature.properties);
                         return;
                     }
                     
@@ -170,7 +139,9 @@
                         updatePreview();
                         
                         geoJsonLayer.eachLayer(l => {
-                            const lName = extractProvinceName(l.feature.properties);
+                            const lName = l.feature.properties?.statnaam || 
+                                        l.feature.properties?.naam || 
+                                        l.feature.properties?.name;
                             if (lName === name) {
                                 l.setStyle({ weight: 4, color: '#ff4444', fillOpacity: 0.4 });
                             } else {
@@ -197,26 +168,16 @@
                 map.fitBounds(geoJsonLayer.getBounds());
             }
             
-            // Log alle provincienamen om te controleren
-            const provinceNames = Object.keys(provinceLayers);
-            console.log('Geladen provincies:', provinceNames.sort());
-            
-            if (provinceNames.length < 12) {
-                console.log('Missende provincies: Limburg, Noord-Brabant, of anderen?');
-            }
-            
             // Herstel opgeslagen afbeeldingen
             for (const [prov, img] of Object.entries(provinceImages)) {
                 if (provinceLayers[prov]) applyImageToProvince(prov, img);
             }
-            
-        } catch (error) {
+        })
+        .catch(error => {
             hideLoading();
             console.error('Fout bij laden:', error);
-            document.getElementById('info-text').innerHTML = `❌ Fout: ${error.message}`;
-            alert(`Kan provincies niet laden.\n\nFout: ${error.message}`);
-        }
-    }
+            alert(`❌ Kan provincies.json niet laden.\n\nZorg dat:\n1. Je het CBS GeoJSON bestand hebt gedownload\n2. Het bestand in dezelfde map staat als index.html\n3. Het bestand 'provincies.json' heet\n\nFout: ${error.message}`);
+        });
     
     function applyImageToProvince(provinceName, imageUrl) {
         const layer = provinceLayers[provinceName];
@@ -344,9 +305,6 @@
         updatePreview();
         alert(`✅ Afbeelding verwijderd van ${currentProvince}`);
     });
-    
-    // Start!
-    loadMap();
 </script>
 </body>
 </html>
