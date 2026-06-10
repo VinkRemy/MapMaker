@@ -54,8 +54,8 @@
         <div class="info-text">
             ✅ Exacte CBS provinciegrenzen<br>
             📍 Afbeelding wordt getekend binnen de provincievorm<br>
-            🔄 Blijft perfect bij zoomen en pannen!<br>
-            ✂️ Geen rare verschuivingen meer
+            🔄 Blijft perfect bij zoomen én slepen!<br>
+            ✂️ Geen delay, geen verschuivingen
         </div>
     </div>
 </div>
@@ -72,7 +72,7 @@
     let geoJsonLayer = null;
     let provinceLayers = {};
     let canvasOverlay = null;
-    let redrawNeeded = true;
+    let animationFrameId = null;
     
     function showLoading() {
         const mapDiv = document.getElementById('map');
@@ -89,11 +89,11 @@
         if (loader) loader.remove();
     }
     
-    // Canvas overlay klasse voor het tekenen van afbeeldingen
+    // Canvas overlay klasse met continue rendering
     const ImageCanvasOverlay = L.Layer.extend({
         initialize: function(options) {
             L.setOptions(this, options);
-            this._drawing = false;
+            this._needsRedraw = true;
         },
         
         onAdd: function(map) {
@@ -112,20 +112,45 @@
             
             this._resize();
             
-            map.on('moveend', this._redraw, this);
-            map.on('zoomend', this._redraw, this);
+            // Gebruik 'move' IPV 'moveend' - tijdens het slepen updaten!
+            map.on('move', this._onMove, this);
+            map.on('zoom', this._onMove, this);
             map.on('resize', this._resize, this);
             
-            this._redraw();
+            this._startRenderLoop();
         },
         
         onRemove: function(map) {
-            map.off('moveend', this._redraw, this);
-            map.off('zoomend', this._redraw, this);
+            this._stopRenderLoop();
+            
+            map.off('move', this._onMove, this);
+            map.off('zoom', this._onMove, this);
             map.off('resize', this._resize, this);
             
             if (this._canvas) {
                 this._canvas.remove();
+            }
+        },
+        
+        _onMove: function() {
+            this._needsRedraw = true;
+        },
+        
+        _startRenderLoop: function() {
+            const render = () => {
+                if (this._needsRedraw && this._canvas) {
+                    this._redraw();
+                    this._needsRedraw = false;
+                }
+                animationFrameId = requestAnimationFrame(render);
+            };
+            render();
+        },
+        
+        _stopRenderLoop: function() {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
             }
         },
         
@@ -135,11 +160,56 @@
             this._canvas.height = size.y;
             this._canvas.style.width = size.x + 'px';
             this._canvas.style.height = size.y + 'px';
-            this._redraw();
+            this._needsRedraw = true;
+        },
+        
+        _getPolygonPointsInContainerCoords: function(layer) {
+            // Haal alle punten in container coördinaten
+            const points = [];
+            
+            function processRing(ring) {
+                for (const coord of ring) {
+                    const latLng = L.latLng(coord[1], coord[0]);
+                    const point = this._map.latLngToContainerPoint(latLng);
+                    points.push(point);
+                }
+            }
+            
+            if (layer.feature && layer.feature.geometry) {
+                const geom = layer.feature.geometry;
+                if (geom.type === 'Polygon') {
+                    for (const ring of geom.coordinates) {
+                        processRing.call(this, ring);
+                    }
+                } else if (geom.type === 'MultiPolygon') {
+                    for (const polygon of geom.coordinates) {
+                        for (const ring of polygon) {
+                            processRing.call(this, ring);
+                        }
+                    }
+                }
+            } else if (layer._latlngs) {
+                // Fallback voor Leaflet polygon
+                const processLatLngs = (latlngs) => {
+                    if (Array.isArray(latlngs)) {
+                        for (const item of latlngs) {
+                            if (item.lat !== undefined) {
+                                const point = this._map.latLngToContainerPoint(item);
+                                points.push(point);
+                            } else {
+                                processLatLngs(item);
+                            }
+                        }
+                    }
+                };
+                processLatLngs(layer._latlngs);
+            }
+            
+            return points;
         },
         
         _redraw: function() {
-            if (!this._canvas) return;
+            if (!this._canvas || !this._map) return;
             
             const ctx = this._canvas.getContext('2d');
             ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
@@ -161,25 +231,24 @@
                 // Sla context op
                 ctx.save();
                 
-                // Maak een clip path van de provincie
+                // Maak een clip path van de provincie (exacte vorm!)
                 ctx.beginPath();
                 
-                // Haal de polygon punten op
-                const latlngs = this._getPolygonPoints(layer);
-                if (latlngs.length === 0) {
+                // Haal alle polygon punten op in container coördinaten
+                const points = this._getPolygonPointsInContainerCoords(layer);
+                if (points.length === 0) {
                     ctx.restore();
                     continue;
                 }
                 
                 // Teken het pad
                 let first = true;
-                for (const point of latlngs) {
-                    const containerPoint = this._map.latLngToContainerPoint(point);
+                for (const point of points) {
                     if (first) {
-                        ctx.moveTo(containerPoint.x, containerPoint.y);
+                        ctx.moveTo(point.x, point.y);
                         first = false;
                     } else {
-                        ctx.lineTo(containerPoint.x, containerPoint.y);
+                        ctx.lineTo(point.x, point.y);
                     }
                 }
                 ctx.closePath();
@@ -196,51 +265,8 @@
             }
         },
         
-        _getPolygonPoints: function(layer) {
-            // Haal alle punten uit de layer (ondersteunt Polygon en MultiPolygon)
-            const points = [];
-            
-            function extractPoints(geometry) {
-                if (geometry.type === 'Polygon') {
-                    for (const ring of geometry.coordinates) {
-                        for (const coord of ring) {
-                            points.push(L.latLng(coord[1], coord[0]));
-                        }
-                    }
-                } else if (geometry.type === 'MultiPolygon') {
-                    for (const polygon of geometry.coordinates) {
-                        for (const ring of polygon) {
-                            for (const coord of ring) {
-                                points.push(L.latLng(coord[1], coord[0]));
-                            }
-                        }
-                    }
-                }
-            }
-            
-            if (layer.feature && layer.feature.geometry) {
-                extractPoints(layer.feature.geometry);
-            } else if (layer._latlngs) {
-                // Fallback voor Leaflet polygon
-                const processLatLngs = (latlngs) => {
-                    if (Array.isArray(latlngs)) {
-                        for (const item of latlngs) {
-                            if (item.lat !== undefined) {
-                                points.push(item);
-                            } else {
-                                processLatLngs(item);
-                            }
-                        }
-                    }
-                };
-                processLatLngs(layer._latlngs);
-            }
-            
-            return points;
-        },
-        
         refresh: function() {
-            this._redraw();
+            this._needsRedraw = true;
         }
     });
     
@@ -252,7 +278,6 @@
         }
         
         const img = new Image();
-        img.crossOrigin = 'Anonymous';
         
         img.onload = () => {
             provinceImages[provinceName] = {
