@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MapChart-Kloon - Exacte CBS Provincies</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; }
+        .container { display: flex; gap: 20px; max-width: 1400px; margin: 0 auto; flex-wrap: wrap; }
+        .map-wrapper { flex: 2; min-width: 500px; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; position: relative; }
+        #map { height: 600px; width: 100%; background: #e9e9e9; }
+        .sidebar { flex: 1; min-width: 280px; background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .selected-info { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center; }
+        #selected-province-name { font-size: 20px; font-weight: bold; color: #0d47a1; margin-top: 5px; }
+        input[type="file"] { width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 5px; margin-bottom: 10px; }
+        button { width: 100%; padding: 10px; margin: 5px 0; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .btn-primary { background: #1976d2; color: white; }
+        .btn-secondary { background: #dc3545; color: white; }
+        .preview { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; text-align: center; }
+        .preview img { max-width: 100%; max-height: 150px; margin-top: 10px; border-radius: 5px; }
+        .info-text { font-size: 13px; color: #666; margin-top: 15px; padding: 10px; background: #e8f5e9; border-radius: 5px; }
+        h2 { margin-bottom: 10px; }
+        .loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 8px; z-index: 1000; text-align: center; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="map-wrapper">
+        <div id="map"></div>
+    </div>
+    <div class="sidebar">
+        <h2>🗺️ MapChart-Kloon</h2>
+        <p>Klik op een provincie → voeg afbeelding toe</p>
+        
+        <div class="selected-info">
+            <h3>📍 Geselecteerd</h3>
+            <div id="selected-province-name">Geen</div>
+        </div>
+        
+        <label>🖼️ Afbeelding:</label>
+        <input type="file" id="imageUpload" accept="image/*">
+        <button class="btn-primary" id="setImageBtn">Zet als achtergrond</button>
+        <button class="btn-secondary" id="resetImageBtn">Reset afbeelding</button>
+        
+        <div class="preview" id="preview">
+            <strong>Huidige afbeelding:</strong><br>
+            <span id="preview-text">Geen</span>
+            <div id="preview-image"></div>
+        </div>
+        
+        <div class="info-text">
+            ✅ Exacte CBS provinciegrenzen (vanuit lokaal bestand)<br>
+            📍 Upload afbeelding per provincie<br>
+            🔄 Afbeelding blijft zitten bij zoomen/pan
+        </div>
+    </div>
+</div>
+
+<script>
+    const map = L.map('map').setView([52.2, 5.5], 8);
+    
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; CARTO'
+    }).addTo(map);
+    
+    let provinceImages = {};
+    let currentProvince = null;
+    let geoJsonLayer = null;
+    let provinceLayers = {};
+    
+    function showLoading() {
+        const mapDiv = document.getElementById('map');
+        const existing = document.querySelector('.loading');
+        if (existing) existing.remove();
+        const loader = document.createElement('div');
+        loader.className = 'loading';
+        loader.innerHTML = '<strong>📥 Laden van provinciegrenzen...</strong>';
+        mapDiv.appendChild(loader);
+    }
+    
+    function hideLoading() {
+        const loader = document.querySelector('.loading');
+        if (loader) loader.remove();
+    }
+    
+    showLoading();
+    
+    // Gebruik het gedownloade CBS bestand
+    // Zet het bestand in dezelfde map als index.html en noem het 'provincies.json'
+    fetch('provincies.json')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            hideLoading();
+            console.log('✅ CBS provincies geladen:', data.features?.length || 'onbekend aantal');
+            
+            // Check of de data features heeft (GeoJSON formaat)
+            let geoJsonData = data;
+            if (data.features) {
+                geoJsonData = data;
+            } else if (data.result && data.result.features) {
+                geoJsonData = data.result;
+            } else {
+                console.warn('Onbekend formaat:', data);
+            }
+            
+            geoJsonLayer = L.geoJSON(geoJsonData, {
+                style: {
+                    color: 'white',
+                    weight: 2,
+                    fillColor: '#69b3b2',
+                    fillOpacity: 0.7
+                },
+                onEachFeature: (feature, layer) => {
+                    // CBS gebruikt vaak 'statnaam' of 'naam' voor de provincienaam
+                    const name = feature.properties?.statnaam || 
+                                feature.properties?.naam || 
+                                feature.properties?.provincienaam ||
+                                feature.properties?.name;
+                    
+                    if (!name) {
+                        console.warn('Geen naam gevonden:', feature.properties);
+                        return;
+                    }
+                    
+                    provinceLayers[name] = layer;
+                    
+                    layer.on('click', () => {
+                        currentProvince = name;
+                        document.getElementById('selected-province-name').innerText = name;
+                        updatePreview();
+                        
+                        geoJsonLayer.eachLayer(l => {
+                            const lName = l.feature.properties?.statnaam || 
+                                        l.feature.properties?.naam || 
+                                        l.feature.properties?.name;
+                            if (lName === name) {
+                                l.setStyle({ weight: 4, color: '#ff4444', fillOpacity: 0.4 });
+                            } else {
+                                geoJsonLayer.resetStyle(l);
+                            }
+                        });
+                    });
+                    
+                    layer.on('mouseover', () => {
+                        if (currentProvince !== name) {
+                            layer.setStyle({ weight: 3, color: '#666', fillOpacity: 0.8 });
+                        }
+                    });
+                    
+                    layer.on('mouseout', () => {
+                        if (currentProvince !== name) geoJsonLayer.resetStyle(layer);
+                    });
+                    
+                    layer.bindPopup(`<b>${name}</b><br>Klik om afbeelding toe te voegen`);
+                }
+            }).addTo(map);
+            
+            if (geoJsonLayer.getBounds().isValid()) {
+                map.fitBounds(geoJsonLayer.getBounds());
+            }
+            
+            // Herstel opgeslagen afbeeldingen
+            for (const [prov, img] of Object.entries(provinceImages)) {
+                if (provinceLayers[prov]) applyImageToProvince(prov, img);
+            }
+        })
+        .catch(error => {
+            hideLoading();
+            console.error('Fout bij laden:', error);
+            alert(`❌ Kan provincies.json niet laden.\n\nZorg dat:\n1. Je het CBS GeoJSON bestand hebt gedownload\n2. Het bestand in dezelfde map staat als index.html\n3. Het bestand 'provincies.json' heet\n\nFout: ${error.message}`);
+        });
+    
+    function applyImageToProvince(provinceName, imageUrl) {
+        const layer = provinceLayers[provinceName];
+        if (!layer || typeof d3 === 'undefined') return;
+        
+        let svgContainer = d3.select("#map").select("svg.province-overlays");
+        if (svgContainer.empty()) {
+            svgContainer = d3.select("#map")
+                .append("svg")
+                .attr("class", "province-overlays")
+                .style("position", "absolute")
+                .style("top", "0")
+                .style("left", "0")
+                .style("width", "100%")
+                .style("height", "100%")
+                .style("pointer-events", "none")
+                .style("z-index", "200");
+        }
+        
+        const bounds = layer.getBounds();
+        const topLeft = map.latLngToLayerPoint(bounds.getNorthWest());
+        const bottomRight = map.latLngToLayerPoint(bounds.getSouthEast());
+        const width = bottomRight.x - topLeft.x;
+        const height = bottomRight.y - topLeft.y;
+        
+        if (width <= 0 || height <= 0) return;
+        
+        const patternId = `pattern-${provinceName.replace(/\s/g, '')}`;
+        
+        let defs = svgContainer.select("defs");
+        if (defs.empty()) defs = svgContainer.append("defs");
+        
+        defs.select("#" + patternId).remove();
+        
+        const pattern = defs.append("pattern")
+            .attr("id", patternId)
+            .attr("patternUnits", "userSpaceOnUse")
+            .attr("width", width)
+            .attr("height", height);
+        
+        pattern.append("image")
+            .attr("href", imageUrl)
+            .attr("width", width)
+            .attr("height", height)
+            .attr("preserveAspectRatio", "xMidYMid slice");
+        
+        svgContainer.selectAll(`.province-overlay-${provinceName.replace(/\s/g, '')}`).remove();
+        
+        svgContainer.append("rect")
+            .attr("class", `province-overlay-${provinceName.replace(/\s/g, '')}`)
+            .attr("x", topLeft.x)
+            .attr("y", topLeft.y)
+            .attr("width", width)
+            .attr("height", height)
+            .attr("fill", `url(#${patternId})`)
+            .attr("opacity", 0.9);
+        
+        layer.setStyle({ fillOpacity: 0, fillColor: 'transparent' });
+        
+        function updatePosition() {
+            const newBounds = layer.getBounds();
+            if (!newBounds.isValid()) return;
+            const newTL = map.latLngToLayerPoint(newBounds.getNorthWest());
+            const newBR = map.latLngToLayerPoint(newBounds.getSouthEast());
+            const newW = newBR.x - newTL.x;
+            const newH = newBR.y - newTL.y;
+            if (newW <= 0 || newH <= 0) return;
+            
+            const rect = svgContainer.select(`.province-overlay-${provinceName.replace(/\s/g, '')}`);
+            if (!rect.empty()) {
+                rect.attr("x", newTL.x).attr("y", newTL.y).attr("width", newW).attr("height", newH);
+                pattern.attr("width", newW).attr("height", newH);
+                pattern.select("image").attr("width", newW).attr("height", newH);
+            }
+        }
+        
+        map.on("move", updatePosition);
+        map.on("zoom", updatePosition);
+    }
+    
+    function resetProvinceImage(provinceName) {
+        if (typeof d3 !== 'undefined') {
+            const svgContainer = d3.select("#map").select("svg.province-overlays");
+            if (!svgContainer.empty()) {
+                svgContainer.selectAll(`.province-overlay-${provinceName.replace(/\s/g, '')}`).remove();
+                svgContainer.select("defs").select(`#pattern-${provinceName.replace(/\s/g, '')}`).remove();
+            }
+        }
+        const layer = provinceLayers[provinceName];
+        if (layer) layer.setStyle({ fillColor: '#69b3b2', fillOpacity: 0.7 });
+    }
+    
+    function updatePreview() {
+        const previewDiv = document.getElementById('preview-image');
+        const previewText = document.getElementById('preview-text');
+        if (currentProvince && provinceImages[currentProvince]) {
+            previewText.innerHTML = 'Afbeelding:';
+            previewDiv.innerHTML = `<img src="${provinceImages[currentProvince]}" alt="Preview">`;
+        } else {
+            previewText.innerHTML = 'Geen afbeelding';
+            previewDiv.innerHTML = '';
+        }
+    }
+    
+    document.getElementById('setImageBtn').addEventListener('click', () => {
+        if (!currentProvince) return alert('Klik eerst op een provincie');
+        const file = document.getElementById('imageUpload').files[0];
+        if (!file) return alert('Kies een afbeelding');
+        
+        const reader = new FileReader();
+        reader.onload = e => {
+            provinceImages[currentProvince] = e.target.result;
+            applyImageToProvince(currentProvince, e.target.result);
+            updatePreview();
+            alert(`✅ Afbeelding toegevoegd aan ${currentProvince}`);
+        };
+        reader.readAsDataURL(file);
+    });
+    
+    document.getElementById('resetImageBtn').addEventListener('click', () => {
+        if (!currentProvince) return alert('Klik eerst op een provincie');
+        if (!provinceImages[currentProvince]) return alert('Deze provincie heeft geen afbeelding');
+        delete provinceImages[currentProvince];
+        resetProvinceImage(currentProvince);
+        updatePreview();
+        alert(`✅ Afbeelding verwijderd van ${currentProvince}`);
+    });
+</script>
+</body>
+</html>
