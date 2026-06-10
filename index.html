@@ -6,7 +6,6 @@
     <title>MapChart-Kloon - Exacte CBS Provincies</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; }
@@ -71,6 +70,7 @@
     let currentProvince = null;
     let geoJsonLayer = null;
     let provinceLayers = {};
+    let imageOverlays = {}; // Hier slaan we de image overlays op
     
     function showLoading() {
         const mapDiv = document.getElementById('map');
@@ -90,7 +90,6 @@
     showLoading();
     
     // Gebruik het gedownloade CBS bestand
-    // Zet het bestand in dezelfde map als index.html en noem het 'provincies.json'
     fetch('provincies.json')
         .then(response => {
             if (!response.ok) {
@@ -100,16 +99,13 @@
         })
         .then(data => {
             hideLoading();
-            console.log('✅ CBS provincies geladen:', data.features?.length || 'onbekend aantal');
+            console.log('✅ CBS provincies geladen');
             
-            // Check of de data features heeft (GeoJSON formaat)
             let geoJsonData = data;
             if (data.features) {
                 geoJsonData = data;
             } else if (data.result && data.result.features) {
                 geoJsonData = data.result;
-            } else {
-                console.warn('Onbekend formaat:', data);
             }
             
             geoJsonLayer = L.geoJSON(geoJsonData, {
@@ -120,7 +116,7 @@
                     fillOpacity: 0.7
                 },
                 onEachFeature: (feature, layer) => {
-                    // CBS gebruikt vaak 'statnaam' of 'naam' voor de provincienaam
+                    // Probeer verschillende property namen voor de provincienaam
                     const name = feature.properties?.statnaam || 
                                 feature.properties?.naam || 
                                 feature.properties?.provincienaam ||
@@ -138,6 +134,7 @@
                         document.getElementById('selected-province-name').innerText = name;
                         updatePreview();
                         
+                        // Highlight geselecteerde provincie
                         geoJsonLayer.eachLayer(l => {
                             const lName = l.feature.properties?.statnaam || 
                                         l.feature.properties?.naam || 
@@ -170,7 +167,9 @@
             
             // Herstel opgeslagen afbeeldingen
             for (const [prov, img] of Object.entries(provinceImages)) {
-                if (provinceLayers[prov]) applyImageToProvince(prov, img);
+                if (provinceLayers[prov]) {
+                    applyImageToProvince(prov, img);
+                }
             }
         })
         .catch(error => {
@@ -181,93 +180,59 @@
     
     function applyImageToProvince(provinceName, imageUrl) {
         const layer = provinceLayers[provinceName];
-        if (!layer || typeof d3 === 'undefined') return;
-        
-        let svgContainer = d3.select("#map").select("svg.province-overlays");
-        if (svgContainer.empty()) {
-            svgContainer = d3.select("#map")
-                .append("svg")
-                .attr("class", "province-overlays")
-                .style("position", "absolute")
-                .style("top", "0")
-                .style("left", "0")
-                .style("width", "100%")
-                .style("height", "100%")
-                .style("pointer-events", "none")
-                .style("z-index", "200");
+        if (!layer) {
+            console.error('Laag niet gevonden voor:', provinceName);
+            return;
         }
         
+        // Verwijder bestaande overlay als die er is
+        if (imageOverlays[provinceName]) {
+            map.removeLayer(imageOverlays[provinceName]);
+            delete imageOverlays[provinceName];
+        }
+        
+        // Krijg de bounds van de provincie
         const bounds = layer.getBounds();
-        const topLeft = map.latLngToLayerPoint(bounds.getNorthWest());
-        const bottomRight = map.latLngToLayerPoint(bounds.getSouthEast());
-        const width = bottomRight.x - topLeft.x;
-        const height = bottomRight.y - topLeft.y;
         
-        if (width <= 0 || height <= 0) return;
+        // Maak een image overlay
+        const imageOverlay = L.imageOverlay(imageUrl, bounds, {
+            opacity: 0.9,
+            interactive: false,
+            zIndex: 10
+        }).addTo(map);
         
-        const patternId = `pattern-${provinceName.replace(/\s/g, '')}`;
+        imageOverlays[provinceName] = imageOverlay;
         
-        let defs = svgContainer.select("defs");
-        if (defs.empty()) defs = svgContainer.append("defs");
+        // Maak de provincie transparant zodat de afbeelding zichtbaar is
+        layer.setStyle({ 
+            fillOpacity: 0, 
+            fillColor: 'transparent',
+            color: 'white',
+            weight: 2
+        });
         
-        defs.select("#" + patternId).remove();
-        
-        const pattern = defs.append("pattern")
-            .attr("id", patternId)
-            .attr("patternUnits", "userSpaceOnUse")
-            .attr("width", width)
-            .attr("height", height);
-        
-        pattern.append("image")
-            .attr("href", imageUrl)
-            .attr("width", width)
-            .attr("height", height)
-            .attr("preserveAspectRatio", "xMidYMid slice");
-        
-        svgContainer.selectAll(`.province-overlay-${provinceName.replace(/\s/g, '')}`).remove();
-        
-        svgContainer.append("rect")
-            .attr("class", `province-overlay-${provinceName.replace(/\s/g, '')}`)
-            .attr("x", topLeft.x)
-            .attr("y", topLeft.y)
-            .attr("width", width)
-            .attr("height", height)
-            .attr("fill", `url(#${patternId})`)
-            .attr("opacity", 0.9);
-        
-        layer.setStyle({ fillOpacity: 0, fillColor: 'transparent' });
-        
-        function updatePosition() {
-            const newBounds = layer.getBounds();
-            if (!newBounds.isValid()) return;
-            const newTL = map.latLngToLayerPoint(newBounds.getNorthWest());
-            const newBR = map.latLngToLayerPoint(newBounds.getSouthEast());
-            const newW = newBR.x - newTL.x;
-            const newH = newBR.y - newTL.y;
-            if (newW <= 0 || newH <= 0) return;
-            
-            const rect = svgContainer.select(`.province-overlay-${provinceName.replace(/\s/g, '')}`);
-            if (!rect.empty()) {
-                rect.attr("x", newTL.x).attr("y", newTL.y).attr("width", newW).attr("height", newH);
-                pattern.attr("width", newW).attr("height", newH);
-                pattern.select("image").attr("width", newW).attr("height", newH);
-            }
-        }
-        
-        map.on("move", updatePosition);
-        map.on("zoom", updatePosition);
+        console.log(`✅ Afbeelding toegevoegd aan ${provinceName}`);
     }
     
     function resetProvinceImage(provinceName) {
-        if (typeof d3 !== 'undefined') {
-            const svgContainer = d3.select("#map").select("svg.province-overlays");
-            if (!svgContainer.empty()) {
-                svgContainer.selectAll(`.province-overlay-${provinceName.replace(/\s/g, '')}`).remove();
-                svgContainer.select("defs").select(`#pattern-${provinceName.replace(/\s/g, '')}`).remove();
-            }
+        // Verwijder de image overlay
+        if (imageOverlays[provinceName]) {
+            map.removeLayer(imageOverlays[provinceName]);
+            delete imageOverlays[provinceName];
         }
+        
+        // Zet de provincie stijl terug
         const layer = provinceLayers[provinceName];
-        if (layer) layer.setStyle({ fillColor: '#69b3b2', fillOpacity: 0.7 });
+        if (layer) {
+            layer.setStyle({ 
+                fillColor: '#69b3b2', 
+                fillOpacity: 0.7,
+                color: 'white',
+                weight: 2
+            });
+        }
+        
+        console.log(`✅ Afbeelding verwijderd van ${provinceName}`);
     }
     
     function updatePreview() {
@@ -283,23 +248,42 @@
     }
     
     document.getElementById('setImageBtn').addEventListener('click', () => {
-        if (!currentProvince) return alert('Klik eerst op een provincie');
+        if (!currentProvince) {
+            alert('❌ Klik eerst op een provincie op de kaart!');
+            return;
+        }
+        
         const file = document.getElementById('imageUpload').files[0];
-        if (!file) return alert('Kies een afbeelding');
+        if (!file) {
+            alert('❌ Kies eerst een afbeelding!');
+            return;
+        }
         
         const reader = new FileReader();
         reader.onload = e => {
-            provinceImages[currentProvince] = e.target.result;
-            applyImageToProvince(currentProvince, e.target.result);
+            const imageUrl = e.target.result;
+            provinceImages[currentProvince] = imageUrl;
+            applyImageToProvince(currentProvince, imageUrl);
             updatePreview();
             alert(`✅ Afbeelding toegevoegd aan ${currentProvince}`);
+        };
+        reader.onerror = () => {
+            alert('❌ Fout bij lezen van afbeelding');
         };
         reader.readAsDataURL(file);
     });
     
     document.getElementById('resetImageBtn').addEventListener('click', () => {
-        if (!currentProvince) return alert('Klik eerst op een provincie');
-        if (!provinceImages[currentProvince]) return alert('Deze provincie heeft geen afbeelding');
+        if (!currentProvince) {
+            alert('❌ Klik eerst op een provincie!');
+            return;
+        }
+        
+        if (!provinceImages[currentProvince]) {
+            alert(`ℹ️ ${currentProvince} heeft nog geen afbeelding`);
+            return;
+        }
+        
         delete provinceImages[currentProvince];
         resetProvinceImage(currentProvince);
         updatePreview();
